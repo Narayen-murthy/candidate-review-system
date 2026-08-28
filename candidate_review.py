@@ -159,30 +159,68 @@ def build_candidate_profile(resume_text: str, transcript_text: str) -> Candidate
 
 # -----------------------
 # LLM client using OpenAI (with safe JSON parsing) and fallback to dummy
+# Supports both the old openai v0.x API (ChatCompletion) and new openai v1.x API (OpenAI client)
 # -----------------------
 class LLMClient:
     def __init__(self, provider: str = "openai"):
         # provider may be 'openai' or 'dummy'
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.model = os.getenv("LLM_MODEL", "gpt-4")
+        self.client = None
         if self.api_key and openai is not None:
-            openai.api_key = self.api_key
-            self.provider = 'openai'
+            # Configure for new or old openai package
+            try:
+                # new style: openai.OpenAI exists
+                if hasattr(openai, "OpenAI"):
+                    self.client = openai.OpenAI(api_key=self.api_key)
+                else:
+                    # old style: set api_key on module
+                    openai.api_key = self.api_key
+                self.provider = 'openai'
+            except Exception:
+                self.provider = 'dummy'
         else:
             self.provider = 'dummy'
 
     def _call_openai(self, prompt: str) -> str:
-        # call ChatCompletion with retries
+        # call ChatCompletion with retries; handle both library versions
         last_exc = None
         for attempt in range(3):
             try:
-                resp = openai.ChatCompletion.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                    max_tokens=1000,
-                )
-                return resp['choices'][0]['message']['content']
+                if self.provider != 'openai':
+                    raise RuntimeError("OpenAI provider not configured")
+
+                # Old client (openai<1.0)
+                if hasattr(openai, 'ChatCompletion'):
+                    resp = openai.ChatCompletion.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                        max_tokens=1000,
+                    )
+                    return resp['choices'][0]['message']['content']
+
+                # New client (openai>=1.0)
+                if hasattr(openai, 'OpenAI'):
+                    client = self.client or openai.OpenAI(api_key=self.api_key)
+                    resp = client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                        max_tokens=1000,
+                    )
+                    # resp behaves like a dict-like OpenAIObject; access choices[0].message.content
+                    try:
+                        return resp['choices'][0]['message']['content']
+                    except Exception:
+                        # fallback attribute style
+                        try:
+                            return resp.choices[0].message.content
+                        except Exception as e:
+                            raise e
+
+                raise RuntimeError("No compatible OpenAI API found")
+
             except Exception as e:
                 last_exc = e
                 sleep(1 + attempt)
