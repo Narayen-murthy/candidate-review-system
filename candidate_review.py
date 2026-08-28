@@ -6,10 +6,17 @@ Single-file Candidate Review prototype for hackathon.
 - Run a multi-round debate where agents must reply to others
 - Produce a reasoned final report (evidence-weighted, not simple averaging)
 
+Improvements added in this version:
+- CLI flags: --real-llm to opt into using OPENAI API; default is deterministic dummy LLM
+- --output <path> to write a run-log JSON that includes initial_opinions and debate_history (with round indices and timestamps)
+- Debate replies now record round index and timestamp so judges can see when opinions changed
+- Basic validation: when using a real LLM, if an agent returns no evidences we insert a conservative placeholder and lower confidence (prevents missing evidence silently passing)
+
 Usage:
 - As a script:
-    python candidate_review.py
-  This runs an example with sample texts and prints the JSON final report.
+    python candidate_review.py            # runs dummy deterministic mode and prints JSON
+    python candidate_review.py --output last_report.json   # save run log
+    python candidate_review.py --real-llm --output live.json  # use OpenAI if OPENAI_API_KEY set
 
 - As an import:
     from candidate_review import evaluate
@@ -19,6 +26,8 @@ Usage:
 import re
 import json
 import os
+import time
+import argparse
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field, asdict
 from time import sleep
@@ -70,6 +79,8 @@ class DebateReply:
     replies_to: str
     text: str
     updated_opinion: Optional[AgentOpinion] = None
+    round_index: Optional[int] = None
+    timestamp: Optional[float] = None
 
 @dataclass
 class FinalReport:
@@ -83,6 +94,7 @@ class FinalReport:
     initial_opinions: List[AgentOpinion] = field(default_factory=list)
     debate_history: List[DebateReply] = field(default_factory=list)
     reasoning: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 # -----------------------
 # Profile builder (now records evidence anchors)
@@ -165,6 +177,9 @@ def build_candidate_profile(resume_text: str, transcript_text: str) -> Candidate
         m = re.search(r"(B\.S\.|Bachelors|M\.S\.|Masters|Ph\.D|Bachelor of|Master of)(.*)", line, re.IGNORECASE)
         if m:
             education.append(line.strip())
+    # Mark unknowns explicitly
+    if not skills:
+        skills = ["(unknown)"]
     return CandidateProfile(
         name=name,
         email=email,
@@ -180,10 +195,22 @@ def build_candidate_profile(resume_text: str, transcript_text: str) -> Candidate
 # LLM client (dummy + openai compatibility)
 # -----------------------
 class LLMClient:
-    def __init__(self, provider: str = "openai"):
+    def __init__(self, provider: str = "auto"):
+        """provider: 'auto' (use env key), 'openai' (force), or 'dummy' (force dummy)
+        """
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.model = os.getenv("LLM_MODEL", "gpt-3.5-turbo")
         self.client = None
+        # Decide provider
+        if provider == 'dummy':
+            self.provider = 'dummy'
+            return
+        if provider == 'openai':
+            # force openai; if no key present, fall back to dummy
+            if not self.api_key:
+                self.provider = 'dummy'
+                return
+        # provider == 'auto'
         if self.api_key and openai is not None:
             try:
                 if hasattr(openai, "OpenAI"):
@@ -387,6 +414,14 @@ class Agent:
         evidences = []
         for e in parsed.get("evidences", []):
             evidences.append(Evidence(quote=e.get("quote", ""), source=e.get("source", "")))
+
+        # Basic validation when using a real LLM: ensure at least one evidence
+        if self.llm.provider == 'openai' and not evidences:
+            # Insert conservative placeholder and lower confidence
+            evidences.append(Evidence(quote="(no evidence provided by model)", source="model_output"))
+            parsed['confidence'] = min(0.4, float(parsed.get('confidence', 0.5)))
+            parsed['rationale'] = (parsed.get('rationale','') + " | WARNING: model returned no evidence").strip()
+
         return AgentOpinion(
             agent_id=self.agent_id,
             role=self.role,
@@ -397,7 +432,7 @@ class Agent:
             evidences=evidences
         )
 
-    def run_debate_response(self, profile_json: str, other_opinions: List[AgentOpinion]) -> DebateReply:
+    def run_debate_response(self, profile_json: str, other_opinions: List[AgentOpinion], round_index: int = 0) -> DebateReply:
         others_summary = "\n".join([
             f"{o.agent_id} ({o.role}): decision={o.decision}, score={o.score}, evidences={[e.quote for e in o.evidences]}"
             for o in other_opinions
@@ -420,6 +455,12 @@ class Agent:
             evids = []
             for e in u.get("evidences", []):
                 evids.append(Evidence(quote=e.get("quote", ""), source=e.get("source", "")))
+            # Basic validation for real LLM debate replies
+            if self.llm.provider == 'openai' and not evids:
+                evids.append(Evidence(quote="(no evidence provided by model)", source="model_output"))
+                u['confidence'] = min(0.4, float(u.get('confidence', 0.5)))
+                u['rationale'] = (u.get('rationale','') + " | WARNING: model returned no evidence").strip()
+
             updated_opinion = AgentOpinion(
                 agent_id=self.agent_id,
                 role=self.role,
@@ -429,16 +470,16 @@ class Agent:
                 rationale=u.get("rationale", ""),
                 evidences=evids
             )
-        return DebateReply(agent_id=self.agent_id, replies_to=reply_to, text=text, updated_opinion=updated_opinion)
+        return DebateReply(agent_id=self.agent_id, replies_to=reply_to, text=text, updated_opinion=updated_opinion, round_index=round_index, timestamp=time.time())
 
 # -----------------------
 # Orchestration
 # -----------------------
-def run_pipeline(resume_text: str, transcript_text: str) -> FinalReport:
+def run_pipeline(resume_text: str, transcript_text: str, provider: str = 'auto') -> FinalReport:
     profile = build_candidate_profile(resume_text, transcript_text)
     profile_json = json.dumps(asdict(profile), indent=2)
 
-    llm_client = LLMClient(provider="dummy")
+    llm_client = LLMClient(provider=provider)
 
     agent_defs = [
         ("agent_tech", "Technical"),
@@ -462,7 +503,7 @@ def run_pipeline(resume_text: str, transcript_text: str) -> FinalReport:
         for aid, role in agent_defs:
             agent = Agent(aid, role, llm_client)
             others = [o for o in opinions if o.agent_id != aid]
-            reply = agent.run_debate_response(profile_json, others)
+            reply = agent.run_debate_response(profile_json, others, round_index=r)
             debate_replies.append(reply)
             if reply.updated_opinion:
                 # replace opinion for that agent
@@ -538,6 +579,13 @@ def run_pipeline(resume_text: str, transcript_text: str) -> FinalReport:
     if not concerns:
         concerns = [e.quote for e in decisive_evidence][:5]
 
+    metadata = {
+        "provider": llm_client.provider,
+        "timestamp": time.time(),
+        "rounds": rounds,
+        "agent_ids": [a for a, _ in agent_defs]
+    }
+
     report = FinalReport(
         recommendation=recommendation,
         confidence=round(float(final_confidence), 3),
@@ -549,14 +597,15 @@ def run_pipeline(resume_text: str, transcript_text: str) -> FinalReport:
         initial_opinions=initial_opinions,
         debate_history=debate_replies,
         reasoning=reasoning,
+        metadata=metadata,
     )
     return report
 
 # -----------------------
 # Convenience wrapper + sample
 # -----------------------
-def evaluate(resume_text: str, transcript_text: str) -> Dict[str, Any]:
-    report = run_pipeline(resume_text, transcript_text)
+def evaluate(resume_text: str, transcript_text: str, provider: str = 'auto') -> Dict[str, Any]:
+    report = run_pipeline(resume_text, transcript_text, provider=provider)
     def conv(obj):
         if isinstance(obj, list):
             return [conv(i) for i in obj]
@@ -630,16 +679,38 @@ Interviewer: You’ve had three roles in 3.5 years, each under a year except the
 Candidate: Better pay and title, mostly. Voltrix is more aligned with what I want long-term.
 """
 
+
 def pretty_print_report(report_dict: Dict[str, Any]):
     print(json.dumps(report_dict, indent=2))
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--real-llm", action="store_true", help="Use real OpenAI LLM (requires OPENAI_API_KEY)")
+    parser.add_argument("--output", type=str, default=None, help="Write full run log (JSON) to this path")
+    args = parser.parse_args()
+
+    provider = 'openai' if args.real_llm else 'dummy'
+
+    if args.real_llm and not os.getenv('OPENAI_API_KEY'):
+        print("WARNING: --real-llm specified but OPENAI_API_KEY is not set. Falling back to dummy provider.")
+        provider = 'dummy'
+
     print("Running example evaluation with sample resume + transcript...\n")
-    res = evaluate(SAMPLE_RESUME, SAMPLE_TRANSCRIPT)
-    pretty_print_report(res)
+    report = run_pipeline(SAMPLE_RESUME, SAMPLE_TRANSCRIPT, provider=provider)
+    report_dict = evaluate(SAMPLE_RESUME, SAMPLE_TRANSCRIPT, provider=provider)
+    pretty_print_report(report_dict)
+
+    if args.output:
+        try:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                json.dump(report_dict, f, indent=2)
+            print(f"\nWrote run log to {args.output}")
+        except Exception as e:
+            print(f"Failed to write output file {args.output}: {e}")
+
     print("\n--- Done ---\n")
-    print("If you want to run with your own text, call evaluate(resume_text, transcript_text) from Python.")
+    print("If you want to run with your own text, call evaluate(resume_text, transcript_text) from Python or use the --output flag to save the run log.")
 
 if __name__ == "__main__":
     main()
