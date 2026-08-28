@@ -1,7 +1,4 @@
+streamlit
 openai
-fastapi
-uvicorn
-pydantic
+pypdf
 python-dotenv
-Flask
-gunicorn
