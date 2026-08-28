@@ -3,8 +3,8 @@
 Single-file Candidate Review prototype for hackathon.
 - Build candidate profile from resume + transcript text
 - Run 4 independent agents (Technical, HR, HiringManager, Skeptic)
-- Run a single-round debate where each agent must reply to at least one other agent
-- Produce a reasoned final report (not simple averaging)
+- Run a multi-round debate where agents must reply to others
+- Produce a reasoned final report (evidence-weighted, not simple averaging)
 
 Usage:
 - As a script:
@@ -34,7 +34,7 @@ except Exception:
 @dataclass
 class Evidence:
     quote: str
-    source: str  # e.g., "resume:line 12" or "transcript:speaker@00:15"
+    source: str  # e.g., "resume:L12" or "transcript:line_5"
     start: Optional[int] = None
     end: Optional[int] = None
 
@@ -80,14 +80,17 @@ class FinalReport:
     concerns: List[str]
     agent_summaries: List[AgentOpinion]
     unresolved_disagreements: List[str]
+    initial_opinions: List[AgentOpinion] = field(default_factory=list)
+    debate_history: List[DebateReply] = field(default_factory=list)
+    reasoning: List[str] = field(default_factory=list)
 
 # -----------------------
-# Profile builder
+# Profile builder (now records evidence anchors)
 # -----------------------
 def parse_basic_contact(resume_text: str):
     name = None
     email = None
-    lines = [l.strip() for l in resume_text.splitlines() if l.strip()]
+    lines = [l.rstrip() for l in resume_text.splitlines() if l.strip()]
     if lines:
         first = lines[0]
         if 2 <= len(first.split()) <= 4 and re.match(r"^[A-Z][a-z]", first):
@@ -96,6 +99,7 @@ def parse_basic_contact(resume_text: str):
     if m2:
         email = m2.group(1)
     return name, email
+
 
 def extract_skills(resume_text: str) -> List[str]:
     skills = []
@@ -117,25 +121,39 @@ def extract_skills(resume_text: str) -> List[str]:
             res.append(s)
     return res
 
+
 def extract_experiences(resume_text: str) -> List[str]:
     exps = []
-    for line in resume_text.splitlines():
+    for idx, line in enumerate(resume_text.splitlines(), start=1):
         if re.search(r"\b(Engineer|Developer|Manager|Intern|Consultant|SWE)\b", line, re.IGNORECASE):
             if len(line.strip()) > 5:
                 exps.append(line.strip())
     return exps
 
+
 def extract_claims(resume_text: str, transcript_text: str) -> List[Claim]:
     claims: List[Claim] = []
-    for m in re.finditer(r"([^.]*\b(?:years|led|improved|built|designed|implemented|managed)\b[^.]*\.)", resume_text, re.IGNORECASE):
-        sentence = m.group(1).strip()
-        claims.append(Claim(text=sentence, evidences=[Evidence(quote=sentence, source="resume")]))
-    for line in transcript_text.splitlines():
+    # Resume claims with line anchors
+    for i, line in enumerate(resume_text.splitlines(), start=1):
+        for m in re.finditer(r"([^.]*\b(?:years|led|improved|built|designed|implemented|managed)\b[^.]*\.)", line, re.IGNORECASE):
+            sentence = m.group(1).strip()
+            claims.append(Claim(text=sentence, evidences=[Evidence(quote=sentence, source=f"resume:L{i}")]))
+    # Transcript claims with line anchors and speaker
+    for i, line in enumerate(transcript_text.splitlines(), start=1):
         if re.search(r"\b(I led|I built|I designed|I implemented|I managed|I have \d+ years|we built|my team)\b", line, re.IGNORECASE):
             s = line.strip()
             if s:
-                claims.append(Claim(text=s, evidences=[Evidence(quote=s, source="transcript")]))
+                # prefix speaker if present (e.g., "Candidate:")
+                speaker = None
+                sp = re.match(r"^(\w+):\s*(.*)$", s)
+                if sp:
+                    speaker = sp.group(1)
+                    quote = sp.group(2)
+                else:
+                    quote = s
+                claims.append(Claim(text=quote, evidences=[Evidence(quote=quote, source=f"transcript:{speaker or 'line'}@L{i}")]))
     return claims
+
 
 def build_candidate_profile(resume_text: str, transcript_text: str) -> CandidateProfile:
     name, email = parse_basic_contact(resume_text)
@@ -143,9 +161,10 @@ def build_candidate_profile(resume_text: str, transcript_text: str) -> Candidate
     experiences = extract_experiences(resume_text)
     claims = extract_claims(resume_text, transcript_text)
     education = []
-    m = re.search(r"(B\.S\.|Bachelors|M\.S\.|Masters|Ph\.D|Bachelor of|Master of)[^\n]*", resume_text, re.IGNORECASE)
-    if m:
-        education.append(m.group(0).strip())
+    for i, line in enumerate(resume_text.splitlines(), start=1):
+        m = re.search(r"(B\.S\.|Bachelors|M\.S\.|Masters|Ph\.D|Bachelor of|Master of)(.*)", line, re.IGNORECASE)
+        if m:
+            education.append(line.strip())
     return CandidateProfile(
         name=name,
         email=email,
@@ -158,23 +177,18 @@ def build_candidate_profile(resume_text: str, transcript_text: str) -> Candidate
     )
 
 # -----------------------
-# LLM client using OpenAI (with safe JSON parsing) and fallback to dummy
-# Supports both the old openai v0.x API (ChatCompletion) and new openai v1.x API (OpenAI client)
+# LLM client (dummy + openai compatibility)
 # -----------------------
 class LLMClient:
     def __init__(self, provider: str = "openai"):
-        # provider may be 'openai' or 'dummy'
         self.api_key = os.getenv("OPENAI_API_KEY")
-        self.model = os.getenv("LLM_MODEL", "gpt-4")
+        self.model = os.getenv("LLM_MODEL", "gpt-3.5-turbo")
         self.client = None
         if self.api_key and openai is not None:
-            # Configure for new or old openai package
             try:
-                # new style: openai.OpenAI exists
                 if hasattr(openai, "OpenAI"):
                     self.client = openai.OpenAI(api_key=self.api_key)
                 else:
-                    # old style: set api_key on module
                     openai.api_key = self.api_key
                 self.provider = 'openai'
             except Exception:
@@ -183,14 +197,11 @@ class LLMClient:
             self.provider = 'dummy'
 
     def _call_openai(self, prompt: str) -> str:
-        # call ChatCompletion with retries; handle both library versions
         last_exc = None
         for attempt in range(3):
             try:
                 if self.provider != 'openai':
                     raise RuntimeError("OpenAI provider not configured")
-
-                # Old client (openai<1.0)
                 if hasattr(openai, 'ChatCompletion'):
                     resp = openai.ChatCompletion.create(
                         model=self.model,
@@ -199,8 +210,6 @@ class LLMClient:
                         max_tokens=1000,
                     )
                     return resp['choices'][0]['message']['content']
-
-                # New client (openai>=1.0)
                 if hasattr(openai, 'OpenAI'):
                     client = self.client or openai.OpenAI(api_key=self.api_key)
                     resp = client.chat.completions.create(
@@ -209,66 +218,64 @@ class LLMClient:
                         temperature=0.0,
                         max_tokens=1000,
                     )
-                    # resp behaves like a dict-like OpenAIObject; access choices[0].message.content
                     try:
                         return resp['choices'][0]['message']['content']
                     except Exception:
-                        # fallback attribute style
-                        try:
-                            return resp.choices[0].message.content
-                        except Exception as e:
-                            raise e
-
+                        return resp.choices[0].message.content
                 raise RuntimeError("No compatible OpenAI API found")
-
             except Exception as e:
                 last_exc = e
                 sleep(1 + attempt)
         raise last_exc
 
     def _extract_json(self, text: str) -> Any:
-        # Try to extract the first JSON object from text robustly
-        # 1) If the text is JSON already, load it
         try:
             return json.loads(text)
         except Exception:
             pass
-        # 2) Try to find the first {...} block
         m = re.search(r"\{.*\}", text, re.S)
         if m:
             candidate = m.group(0)
             try:
                 return json.loads(candidate)
             except Exception:
-                # attempt to fix common issues: replace single quotes with double quotes
                 candidate2 = candidate.replace("'", '"')
                 try:
                     return json.loads(candidate2)
                 except Exception:
                     pass
-        # 3) Could not parse JSON
         raise ValueError("Could not parse JSON from model output")
 
+    def _validate_opinion(self, parsed: Any) -> Dict[str, Any]:
+        # Ensure parsed is a dict with required keys; if not, return a cautious fallback
+        if not isinstance(parsed, dict):
+            return {"decision": "maybe", "score": 60, "confidence": 0.5, "rationale": "Invalid agent output", "evidences": []}
+        required = {"decision", "score", "confidence", "rationale", "evidences"}
+        if not required.issubset(set(parsed.keys())):
+            # try to coerce
+            parsed2 = {k: parsed.get(k) for k in list(required & set(parsed.keys()))}
+            parsed2.setdefault('decision', 'maybe')
+            parsed2.setdefault('score', 60)
+            parsed2.setdefault('confidence', 0.5)
+            parsed2.setdefault('rationale', 'Incomplete output, using conservative defaults')
+            parsed2.setdefault('evidences', [])
+            return parsed2
+        return parsed
+
     def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.0) -> Dict[str, Any]:
-        # If OpenAI provider available, call it and parse JSON output.
         if self.provider == 'openai':
-            # ask the model to produce JSON - rely on our prompt templates to request JSON
             txt = self._call_openai(prompt)
             try:
                 parsed = self._extract_json(txt)
-                if isinstance(parsed, dict):
-                    return parsed
-                # If model returned something else, wrap it
-                return {"decision": "maybe", "score": 60, "confidence": 0.5, "rationale": str(parsed), "evidences": []}
+                parsed = self._validate_opinion(parsed)
+                return parsed
             except Exception as e:
-                # fallback: return a cautious default
                 return {"decision": "maybe", "score": 60, "confidence": 0.5, "rationale": f"Could not parse model JSON: {e}", "evidences": []}
 
-        # Dummy behaviour (previous simulated logic)
+        # Dummy behaviour: deterministic per-role outputs and debate replies
         low = prompt.lower()
         is_debate = ("respond by addressing" in low) or ("other agents' opinions" in low) or ("reply to" in low)
         if is_debate:
-            # Attempt to extract role like before
             m = re.search(r"you are\s+([A-Za-z ]+?)\s+agent", prompt, re.IGNORECASE)
             role = m.group(1).strip().lower() if m else "unknown"
             if "technical" in role:
@@ -281,8 +288,8 @@ class LLMClient:
                         "confidence": 0.65,
                         "rationale": "Technical reduces score slightly because of missing design details, but retains partial confidence due to relevant skills.",
                         "evidences": [
-                            {"quote": "I built a distributed logging service in Python that handled 100k events per second.", "source": "transcript:00:15"},
-                            {"quote": "Skills: Python, Docker, Kubernetes, SQL, React", "source": "resume"}
+                            {"quote": "I built a distributed logging service in Python that handled 100k events per second.", "source": "transcript:L2"},
+                            {"quote": "Skills: Python, Docker, Kubernetes, SQL, React", "source": "resume:L3"}
                         ]
                     }
                 }
@@ -296,8 +303,8 @@ class LLMClient:
                         "confidence": 0.7,
                         "rationale": "Strong communication and leadership signals in transcript and resume.",
                         "evidences": [
-                            {"quote": "I led a team of 3 engineers.", "source": "transcript:00:15"},
-                            {"quote": "Led backend services, improved performance 4x.", "source": "resume"}
+                            {"quote": "I led a team of 3 engineers.", "source": "transcript:L2"},
+                            {"quote": "Led backend services, improved performance 4x.", "source": "resume:L6"}
                         ]
                     }
                 }
@@ -311,8 +318,8 @@ class LLMClient:
                         "confidence": 0.65,
                         "rationale": "Role-fit plausible; recommend follow-up technical validation in interview.",
                         "evidences": [
-                            {"quote": "Senior Software Engineer at Acme Corp (2019-2024)", "source": "resume"},
-                            {"quote": "I have 6 years of backend experience.", "source": "transcript"}
+                            {"quote": "Senior Software Engineer at Acme Corp (2019-2024)", "source": "resume:L6"},
+                            {"quote": "I have 6 years of backend experience.", "source": "transcript:L3"}
                         ]
                     }
                 }
@@ -321,18 +328,18 @@ class LLMClient:
                     "reply_to": "agent_hm",
                     "text": "Skeptic: Throughput/improvement claims lack corroborating evidence and could be exaggerated; request artifacts, logs, or specifics before hiring.",
                 }
-            return {"reply_to": "agent_hm", "text": "I question unverifiable claims; please provide more detail or evidence.", "updated_opinion": {"decision": "maybe", "score": 60, "confidence": 0.5, "rationale": "Generic debate adjustment.", "evidences": [{"quote": "I have 6 years of backend experience.", "source": "transcript"}]}}
+            return {"reply_to": "agent_hm", "text": "I question unverifiable claims; please provide more detail or evidence.", "updated_opinion": {"decision": "maybe", "score": 60, "confidence": 0.5, "rationale": "Generic debate adjustment.", "evidences": [{"quote": "I have 6 years of backend experience.", "source": "transcript:L3"}]}}
 
         # initial opinions (dummy)
         if "technical" in low:
-            return {"decision": "maybe", "score": 70, "confidence": 0.7, "rationale": "Candidate shows technical claims (distributed service, performance improvements) but lacks detailed design or reproducibility artifacts in provided text.", "evidences": [{"quote": "I built a distributed logging service in Python that handled 100k events per second.", "source": "transcript:00:15"}, {"quote": "Skills: Python, Docker, Kubernetes, SQL, React", "source": "resume"}]}
-        elif "hr" in low or "culture" in low:
-            return {"decision": "hire", "score": 75, "confidence": 0.65, "rationale": "Communication appears clear; candidate claims to have led a team and improved performance, indicating ownership and teamwork.", "evidences": [{"quote": "I led a team of 3 engineers.", "source": "transcript:00:15"}, {"quote": "Led backend services, improved performance 4x.", "source": "resume"}]}
-        elif "hiringmanager" in low or "hiring manager" in low:
-            return {"decision": "maybe", "score": 68, "confidence": 0.6, "rationale": "Role-fit plausible given backend experience but need to verify scale and depth for the specific role.", "evidences": [{"quote": "Senior Software Engineer at Acme Corp (2019-2024)", "source": "resume"}, {"quote": "I have 6 years of backend experience.", "source": "transcript"}]}
-        elif "skeptic" in low:
-            return {"decision": "reject", "score": 25, "confidence": 0.8, "rationale": "There are strong claims of throughput and improvements but no corroborating details or artifacts; risk of exaggeration.", "evidences": [{"quote": "I built a distributed logging service in Python that handled 100k events per second.", "source": "transcript"}, {"quote": "improved performance 4x", "source": "resume"}]}
-        return {"decision": "maybe", "score": 60, "confidence": 0.5, "rationale": "Generic simulated opinion.", "evidences": [{"quote": "I have 6 years of backend experience.", "source": "transcript"}]}
+            return {"decision": "maybe", "score": 70, "confidence": 0.7, "rationale": "Candidate shows technical claims but lacks detailed design or reproducibility artifacts.", "evidences": [{"quote": "I built a distributed logging service in Python that handled 100k events per second.", "source": "transcript:L2"}, {"quote": "Skills: Python, Docker, Kubernetes, SQL, React", "source": "resume:L3"}]}
+        if "hr" in low or "culture" in low:
+            return {"decision": "hire", "score": 75, "confidence": 0.65, "rationale": "Communication appears clear; candidate claims to have led a team and improved performance.", "evidences": [{"quote": "I led a team of 3 engineers.", "source": "transcript:L2"}, {"quote": "Led backend services, improved performance 4x.", "source": "resume:L6"}]}
+        if "hiringmanager" in low or "hiring manager" in low:
+            return {"decision": "maybe", "score": 68, "confidence": 0.6, "rationale": "Role-fit plausible given backend experience but need to verify scale and depth for the specific role.", "evidences": [{"quote": "Senior Software Engineer at Acme Corp (2019-2024)", "source": "resume:L6"}, {"quote": "I have 6 years of backend experience.", "source": "transcript:L3"}]}
+        if "skeptic" in low:
+            return {"decision": "reject", "score": 25, "confidence": 0.8, "rationale": "There are strong claims of throughput and improvements but no corroborating details or artifacts; risk of exaggeration.", "evidences": [{"quote": "I built a distributed logging service in Python that handled 100k events per second.", "source": "transcript:L2"}, {"quote": "improved performance 4x", "source": "resume:L6"}]}
+        return {"decision": "maybe", "score": 60, "confidence": 0.5, "rationale": "Generic simulated opinion.", "evidences": [{"quote": "I have 6 years of backend experience.", "source": "transcript:L3"}]}
 
 # -----------------------
 # Agent implementation
@@ -344,7 +351,6 @@ ROLE_GUIDANCE = {
     "Skeptic": "- Try to find contradictions, exaggerations, missing details, or red flags."
 }
 
-# Escape literal braces in evidence example to avoid format conflicts; profile_json will be escaped too.
 PROMPT_TEMPLATE = """
 You are the {role} agent. Evaluate the candidate based ONLY on the provided CandidateProfile and excerpts.
 Rules:
@@ -370,7 +376,6 @@ class Agent:
 
     def build_prompt(self, profile_json: str):
         guidance = ROLE_GUIDANCE.get(self.role, "")
-        # Escape braces in profile_json so format() won't treat JSON braces as placeholders.
         safe_profile = profile_json.replace("{", "{{").replace("}", "}}")
         return PROMPT_TEMPLATE.format(role=self.role, profile_json=safe_profile, role_guidance=guidance)
 
@@ -378,6 +383,7 @@ class Agent:
         prompt = self.build_prompt(profile_json)
         raw = self.llm.generate(prompt)
         parsed = raw if isinstance(raw, dict) else json.loads(raw)
+        parsed = self.llm._validate_opinion(parsed)
         evidences = []
         for e in parsed.get("evidences", []):
             evidences.append(Evidence(quote=e.get("quote", ""), source=e.get("source", "")))
@@ -396,7 +402,6 @@ class Agent:
             f"{o.agent_id} ({o.role}): decision={o.decision}, score={o.score}, evidences={[e.quote for e in o.evidences]}"
             for o in other_opinions
         ])
-        # include role in prompt so dummy LLM can detect it precisely
         debate_prompt = (
             f"You are {self.role} agent. Given the profile and the other agents' opinions:\n{others_summary}\n"
             f"Respond by addressing at least one other agent's point. Include any quote from the source if you update your opinion. "
@@ -405,11 +410,13 @@ class Agent:
         )
         raw = self.llm.generate(debate_prompt)
         parsed = raw if isinstance(raw, dict) else json.loads(raw)
+        # parsed might be a debate reply dict with reply_to/text/updated_opinion
         reply_to = parsed.get("reply_to", "")
         text = parsed.get("text", "")
         updated_opinion = None
         if parsed.get("updated_opinion"):
             u = parsed["updated_opinion"]
+            u = self.llm._validate_opinion(u)
             evids = []
             for e in u.get("evidences", []):
                 evids.append(Evidence(quote=e.get("quote", ""), source=e.get("source", "")))
@@ -439,79 +446,86 @@ def run_pipeline(resume_text: str, transcript_text: str) -> FinalReport:
         ("agent_hm", "HiringManager"),
         ("agent_skeptic", "Skeptic"),
     ]
-    opinions: List[AgentOpinion] = []
 
-    # Independent initial calls (each must be separate LLM calls)
+    # Initial independent opinions
+    initial_opinions: List[AgentOpinion] = []
     for aid, role in agent_defs:
         agent = Agent(aid, role, llm_client)
         op = agent.run_initial_opinion(profile_json)
-        opinions.append(op)
+        initial_opinions.append(op)
 
-    # Debate stage: single round where each agent responds to others
+    # Start debate: multi-round (3 rounds) to encourage opinion changes
+    opinions = [op for op in initial_opinions]
     debate_replies: List[DebateReply] = []
-    for aid, role in agent_defs:
-        agent = Agent(aid, role, llm_client)
-        others = [o for o in opinions if o.agent_id != aid]
-        reply = agent.run_debate_response(profile_json, others)
-        debate_replies.append(reply)
-        if reply.updated_opinion:
-            for idx, op in enumerate(opinions):
-                if op.agent_id == aid:
-                    opinions[idx] = reply.updated_opinion
-                    break
+    rounds = 3
+    for r in range(rounds):
+        for aid, role in agent_defs:
+            agent = Agent(aid, role, llm_client)
+            others = [o for o in opinions if o.agent_id != aid]
+            reply = agent.run_debate_response(profile_json, others)
+            debate_replies.append(reply)
+            if reply.updated_opinion:
+                # replace opinion for that agent
+                for idx, op in enumerate(opinions):
+                    if op.agent_id == aid:
+                        opinions[idx] = reply.updated_opinion
+                        break
 
-    # Final decision aggregator - heuristic weighting + skeptic override
-    hm = next((o for o in opinions if o.role == "HiringManager"), None)
-    tech = next((o for o in opinions if o.role == "Technical"), None)
-    hr = next((o for o in opinions if o.role == "HR"), None)
+    # Aggregation: evidence-weighted scoring with role weights, produce reasoning
+    role_weights = {"HiringManager": 1.4, "Technical": 1.2, "HR": 1.0, "Skeptic": 1.0}
+    weighted_sum = 0.0
+    weight_total = 0.0
+    reasoning: List[str] = []
+    # Gather top evidences
+    evidence_scores: Dict[str, float] = {}
+    for o in opinions:
+        # evidence strength = min(1.0, 0.2 * len(e.evidences) + o.confidence)
+        ev_count = max(0, len(o.evidences))
+        evidence_strength = (o.confidence * 0.6) + (min(3, ev_count) / 3.0 * 0.4)
+        role_w = role_weights.get(o.role, 1.0)
+        weight = o.confidence * role_w * (1.0 + ev_count / 4.0)
+        weighted_sum += o.score * weight
+        weight_total += weight
+        # attribute evidence contributions for reasoning
+        for e in o.evidences:
+            key = f"{e.quote} || {e.source}"
+            evidence_scores[key] = evidence_scores.get(key, 0.0) + (o.score * o.confidence * role_w)
+    final_score = weighted_sum / weight_total if weight_total else 60
+    # Map to recommendation
+    if final_score >= 75:
+        recommendation = "hire"
+    elif final_score >= 55:
+        recommendation = "maybe"
+    else:
+        recommendation = "reject"
+    # Confidence is normalized from confidences weighted by same weights
+    conf_numer = sum([o.confidence * role_weights.get(o.role, 1.0) for o in opinions])
+    conf_denom = sum([role_weights.get(o.role, 1.0) for o in opinions])
+    final_confidence = (conf_numer / conf_denom) if conf_denom else 0.5
+
+    # Build decisive evidence list (top 3 contributing evidence items)
+    top_evidence = sorted(evidence_scores.items(), key=lambda x: x[1], reverse=True)[:3]
+    decisive_evidence = []
+    for k, v in top_evidence:
+        quote, source = k.split(" || ")
+        decisive_evidence.append(Evidence(quote=quote, source=source))
+        reasoning.append(f"Evidence '{quote}' from {source} contributed score weight {v:.1f}")
+
+    # Skeptic override (if strong and well-supported)
     skeptic = next((o for o in opinions if o.role == "Skeptic"), None)
-
-    unresolved: List[str] = []
-    decisive_evidence: List[Evidence] = []
-
-    recommendation = "maybe"
-    conf = 0.5
-
-    if skeptic and skeptic.score < 30 and skeptic.confidence > 0.7:
+    hm = next((o for o in opinions if o.role == "HiringManager"), None)
+    if skeptic and skeptic.score < 30 and skeptic.confidence > 0.75:
+        # if hiring manager strongly favors, soften; else use skeptic decision
         if hm and hm.score >= 85:
             recommendation = "maybe"
-            conf = min(0.85, (hm.confidence + (1 - skeptic.confidence)) / 2 + 0.1)
-            decisive_evidence = hm.evidences + skeptic.evidences[:1]
+            reasoning.append("Skeptic raised a high-confidence low score but HiringManager is strongly favorable; compromise to 'maybe'.")
         else:
             recommendation = "reject"
-            conf = min(0.95, skeptic.confidence + 0.1)
-            decisive_evidence = skeptic.evidences
-    elif hm and hm.score >= 80:
-        recommendation = "hire"
-        conf = min(0.92, hm.confidence + 0.2)
-        decisive_evidence = hm.evidences
-    elif tech and tech.score >= 75 and hm and hm.score >= 60:
-        recommendation = "hire"
-        conf = 0.75
-        decisive_evidence = tech.evidences + (hm.evidences if hm else [])
-    else:
-        weights = {"HiringManager": 1.4, "Technical": 1.2, "HR": 1.0, "Skeptic": 1.0}
-        weighted = 0.0
-        total_w = 0.0
-        for o in opinions:
-            w = weights.get(o.role, 1.0)
-            weighted += o.score * w
-            total_w += w
-        avg = weighted / total_w if total_w else 50
-        if avg >= 75:
-            recommendation = "hire"
-            conf = 0.7
-        elif avg >= 55:
-            recommendation = "maybe"
-            conf = 0.55
-        else:
-            recommendation = "reject"
-            conf = 0.45
-        top = sorted(opinions, key=lambda x: x.score, reverse=True)[:2]
-        for t in top:
-            decisive_evidence.extend(t.evidences)
+            reasoning.append("Skeptic raised a high-confidence low score and no HiringManager override; final decision set to 'reject'.")
 
+    # Collect unresolved disagreements
     decisions = set([o.decision for o in opinions])
+    unresolved = []
     if len(decisions) > 1:
         unresolved = [f"{o.agent_id}({o.role}) => {o.decision} (score={o.score}, conf={o.confidence})" for o in opinions]
 
@@ -519,19 +533,22 @@ def run_pipeline(resume_text: str, transcript_text: str) -> FinalReport:
     concerns = []
     for e in decisive_evidence:
         lowq = e.quote.lower()
-        if "no " in lowq or "not " in lowq or "lack" in lowq or "unverified" in lowq or "risk" in lowq:
+        if any(w in lowq for w in ["no ", "not ", "lack", "unverified", "risk"]):
             concerns.append(e.quote)
     if not concerns:
         concerns = [e.quote for e in decisive_evidence][:5]
 
     report = FinalReport(
         recommendation=recommendation,
-        confidence=round(float(conf), 3),
+        confidence=round(float(final_confidence), 3),
         decisive_evidence=decisive_evidence,
         strengths=strengths,
         concerns=concerns,
         agent_summaries=opinions,
-        unresolved_disagreements=unresolved
+        unresolved_disagreements=unresolved,
+        initial_opinions=initial_opinions,
+        debate_history=debate_replies,
+        reasoning=reasoning,
     )
     return report
 
