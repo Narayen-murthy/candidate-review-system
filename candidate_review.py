@@ -714,3 +714,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+gcloud run deploy candidate-review-system \
+  --source . \
+  --region asia-south1 \
+  --allow-unauthenticated
