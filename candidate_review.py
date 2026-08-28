@@ -288,23 +288,23 @@ class LLMClient:
                         "confidence": 0.65,
                         "rationale": "Technical reduces score slightly because of missing design details, but retains partial confidence due to relevant skills.",
                         "evidences": [
-                            {"quote": "I built a distributed logging service in Python that handled 100k events per second.", "source": "transcript:L2"},
-                            {"quote": "Skills: Python, Docker, Kubernetes, SQL, React", "source": "resume:L3"}
+                            {"quote": "Designed and built the exception-handling engine end-to-end for Voltrix’s multi-agent freight ops platform (planner/executor/reviewer), cutting manual exception review time by 40%.", "source": "resume:L2"},
+                            {"quote": "Built a RAG pipeline over carrier rate documents using LangChain + Pinecone", "source": "resume:L3"}
                         ]
                     }
                 }
             if "hr" in role:
                 return {
                     "reply_to": "agent_skeptic",
-                    "text": "HR: Leadership and communication are clear (led a team, performance improvements); these are positive cultural signals even if artifacts are requested.",
+                    "text": "HR: Leadership and communication are clear (led design, presented work); these are positive cultural signals even if artifacts are requested.",
                     "updated_opinion": {
                         "decision": "hire",
-                        "score": 77,
-                        "confidence": 0.7,
+                        "score": 82,
+                        "confidence": 0.75,
                         "rationale": "Strong communication and leadership signals in transcript and resume.",
                         "evidences": [
-                            {"quote": "I led a team of 3 engineers.", "source": "transcript:L2"},
-                            {"quote": "Led backend services, improved performance 4x.", "source": "resume:L6"}
+                            {"quote": "Presented the system design at a company-wide tech talk.", "source": "resume:L2"},
+                            {"quote": "I led the design, she built most of the production version.", "source": "transcript:Candidate@L7"}
                         ]
                     }
                 }
@@ -314,12 +314,12 @@ class LLMClient:
                     "text": "HiringManager: The candidate looks like a plausible fit; recommend proceeding to a technical interview to validate the claims.",
                     "updated_opinion": {
                         "decision": "maybe",
-                        "score": 70,
-                        "confidence": 0.65,
+                        "score": 80,
+                        "confidence": 0.72,
                         "rationale": "Role-fit plausible; recommend follow-up technical validation in interview.",
                         "evidences": [
-                            {"quote": "Senior Software Engineer at Acme Corp (2019-2024)", "source": "resume:L6"},
-                            {"quote": "I have 6 years of backend experience.", "source": "transcript:L3"}
+                            {"quote": "Sole architect of the retry/escalation logic now running in production, handling 5,000+ freight exceptions/month.", "source": "resume:L2"},
+                            {"quote": "I move fast. I’ve built something structurally close to this already.", "source": "transcript:Candidate@L8"}
                         ]
                     }
                 }
@@ -328,18 +328,18 @@ class LLMClient:
                     "reply_to": "agent_hm",
                     "text": "Skeptic: Throughput/improvement claims lack corroborating evidence and could be exaggerated; request artifacts, logs, or specifics before hiring.",
                 }
-            return {"reply_to": "agent_hm", "text": "I question unverifiable claims; please provide more detail or evidence.", "updated_opinion": {"decision": "maybe", "score": 60, "confidence": 0.5, "rationale": "Generic debate adjustment.", "evidences": [{"quote": "I have 6 years of backend experience.", "source": "transcript:L3"}]}}
+            return {"reply_to": "agent_hm", "text": "I question unverifiable claims; please provide more detail or evidence.", "updated_opinion": {"decision": "maybe", "score": 60, "confidence": 0.6, "rationale": "Cautious", "evidences": []}}
 
         # initial opinions (dummy)
         if "technical" in low:
-            return {"decision": "maybe", "score": 70, "confidence": 0.7, "rationale": "Candidate shows technical claims but lacks detailed design or reproducibility artifacts.", "evidences": [{"quote": "I built a distributed logging service in Python that handled 100k events per second.", "source": "transcript:L2"}, {"quote": "Skills: Python, Docker, Kubernetes, SQL, React", "source": "resume:L3"}]}
+            return {"decision": "maybe", "score": 78, "confidence": 0.75, "rationale": "Strong hands-on agent/production experience but lacking artifacts for some claimed metrics.", "evidences": [{"quote": "Designed and built the exception-handling engine end-to-end for Voltrix’s multi-agent freight ops platform, cutting manual exception review time by 40%.", "source": "resume:L2"}, {"quote": "Sole architect of the retry/escalation logic now running in production, handling 5,000+ freight exceptions/month.", "source": "resume:L2"}]}
         if "hr" in low or "culture" in low:
-            return {"decision": "hire", "score": 75, "confidence": 0.65, "rationale": "Communication appears clear; candidate claims to have led a team and improved performance.", "evidences": [{"quote": "I led a team of 3 engineers.", "source": "transcript:L2"}, {"quote": "Led backend services, improved performance 4x.", "source": "resume:L6"}]}
+            return {"decision": "hire", "score": 80, "confidence": 0.7, "rationale": "Leadership and communication look good.", "evidences": [{"quote": "Presented the system design at a company-wide tech talk.", "source": "resume:L2"}]}
         if "hiringmanager" in low or "hiring manager" in low:
-            return {"decision": "maybe", "score": 68, "confidence": 0.6, "rationale": "Role-fit plausible given backend experience but need to verify scale and depth for the specific role.", "evidences": [{"quote": "Senior Software Engineer at Acme Corp (2019-2024)", "source": "resume:L6"}, {"quote": "I have 6 years of backend experience.", "source": "transcript:L3"}]}
+            return {"decision": "maybe", "score": 75, "confidence": 0.68, "rationale": "Seems like a fit but needs to validate scale and depth.", "evidences": [{"quote": "handling 5,000+ freight exceptions/month.", "source": "resume:L2"}]}
         if "skeptic" in low:
-            return {"decision": "reject", "score": 25, "confidence": 0.8, "rationale": "There are strong claims of throughput and improvements but no corroborating details or artifacts; risk of exaggeration.", "evidences": [{"quote": "I built a distributed logging service in Python that handled 100k events per second.", "source": "transcript:L2"}, {"quote": "improved performance 4x", "source": "resume:L6"}]}
-        return {"decision": "maybe", "score": 60, "confidence": 0.5, "rationale": "Generic simulated opinion.", "evidences": [{"quote": "I have 6 years of backend experience.", "source": "transcript:L3"}]}
+            return {"decision": "reject", "score": 35, "confidence": 0.7, "rationale": "Overstated claims, short tenures, and missing metrics are concerning.", "evidences": [{"quote": "Fine — 'sole architect' is probably too strong.", "source": "transcript:Candidate@L7"}]}
+        return {"decision": "maybe", "score": 60, "confidence": 0.5, "rationale": "Generic simulated opinion.", "evidences": [{"quote": "I have 3.5 years of experience building multi-agent LLM systems and Python backends.", "source": "resume:L1"}]}
 
 # -----------------------
 # Agent implementation
@@ -568,25 +568,66 @@ def evaluate(resume_text: str, transcript_text: str) -> Dict[str, Any]:
         return obj
     return conv(report)
 
-SAMPLE_RESUME = """John Doe
-Email: john.doe@example.com
+SAMPLE_RESUME = """Rohan Malhotra
+Senior AI/Backend Engineer
 
-Skills: Python, Docker, Kubernetes, SQL, React
+Summary
+AI engineer with 3.5 years of experience building multi-agent LLM systems and Python backends. Led design of a production agent platform now handling thousands of daily freight exceptions. Known for moving fast and shipping under pressure.
 
 Experience
-- Senior Software Engineer at Acme Corp (2019-2024)
-  Led backend services, improved performance 4x.
-- Software Engineer at Beta Inc (2016-2019)
-  Built ETL pipelines and APIs.
+Senior AI Engineer — Voltrix Logistics Tech (Jan 2025 – Present, 7 months)
+• Designed and built the exception-handling engine end-to-end for Voltrix’s multi-agent freight ops platform (planner/executor/reviewer pattern), cutting manual exception review time by 40%.
+• Owned prompt design and model routing across GPT-4 and open-weight SLMs, reducing inference cost by ~30%.
+• Sole architect of the retry/escalation logic now running in production, handling 5,000+ freight exceptions/month.
+• Presented the system design at a company-wide tech talk.
+
+AI Engineer — Quickship Data Systems (Feb 2024 – Dec 2024, 11 months)
+• Built a RAG pipeline over carrier rate documents using LangChain + Pinecone, cutting manual rate lookup time significantly.
+• Improved BOL/invoice extraction accuracy through better OCR pre-processing.
+
+Backend Developer — Nimbus Cloud Solutions (Aug 2022 – Jan 2024, 1.5 years)
+• Built Python microservices for a SaaS analytics product used by 50+ enterprise clients.
+• Led a 4-person team migrating a legacy monolith to microservices.
+
+Skills
+Python, FastAPI, LangGraph, CrewAI, MongoDB, React (basic), RAG, Vector Search (Pinecone, FAISS), Prompt Engineering, Docker, Kubernetes
 
 Education
-B.S. Computer Science
+B.Tech Computer Science, 2022
+
+Certifications
+• LangChain for LLM Application Development (2024)
 """
 
-SAMPLE_TRANSCRIPT = """Interviewer: Tell me about a project you're proud of.
-Candidate: I built a distributed logging service in Python that handled 100k events per second. I led a team of 3 engineers.
-Candidate: I have 6 years of backend experience.
-Candidate: I improved latency by 60% in my last role.
+SAMPLE_TRANSCRIPT = """Interviewer: Walk me through the exception-handling engine you built at Voltrix.
+Candidate: It’s planner-executor-reviewer. Failures come in, get classified, retried or escalated, then double-checked. I designed the whole retry/escalation logic.
+
+Interviewer: What made you choose that structure over a simpler rule-based system?
+Candidate: Rules don’t scale. Too many failure types — timeouts, bad EDI, missing BOL fields. Agents handle that better.
+
+Interviewer: How do you measure whether the reviewer agent is actually catching real problems?
+Candidate: We track override rate. It’s low. I’d have to check the exact number though, haven’t looked recently.
+
+Interviewer: What’s your approach to model routing?
+Candidate: Cost-based. Simple stuff to the SLM, harder reasoning to GPT-4. No formal study, just tuned it as things broke.
+
+Interviewer: Tell me about a time you disagreed with a teammate on a technical decision.
+Candidate: Teammate wanted to hardcode more categories up front. I pushed for the agent approach. We went with mine.
+
+Interviewer: Who actually wrote the retry/escalation logic that’s in production now?
+Candidate: I designed it. Priya did a lot of the implementation, I reviewed her PRs. I was the architect.
+
+Interviewer: (Skeptic follow-up) Your resume says “sole architect.” But it sounds like Priya built a lot of it. Can you clarify?
+Candidate: Fine — “sole architect” is probably too strong. I led the design, she built most of the production version.
+
+Interviewer: Why should we invest in ramping you up here versus someone with more freight-domain experience?
+Candidate: I move fast. I’ve built something structurally close to this already. I don’t think I’d need much ramp time.
+
+Interviewer: This role needs long-term ownership of production reliability. How do you feel about being on-call for agent failures?
+Candidate: Fine, I’ve done on-call before. Though Voltrix’s user base is still small, so I haven’t seen serious incident volume yet.
+
+Interviewer: You’ve had three roles in 3.5 years, each under a year except the first. What’s driving that?
+Candidate: Better pay and title, mostly. Voltrix is more aligned with what I want long-term.
 """
 
 def pretty_print_report(report_dict: Dict[str, Any]):
