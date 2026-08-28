@@ -1,126 +1,216 @@
 import os
-from flask import Flask
-
-app = Flask(__name__)
-
-# your existing routes...
-
-if __name__ == "__main__":
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080))
-    )
-    return jsonify(evaluate_with_job(r, t, provider=provider, job_description=job))
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
-from flask import Flask, render_template, request, send_from_directory, jsonify
-import os, json, time
+import json
+import time
+from flask import Flask, render_template, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
-from review_api import evaluate_with_job, compare_candidates
+
+from candidate_review import evaluate, SAMPLE_RESUME, SAMPLE_TRANSCRIPT
+
 
 app = Flask(__name__)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads')
-OUTPUT_DIR = os.path.join(BASE_DIR, 'outputs')
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-@app.route('/')
+
+def read_uploaded_file(file_obj):
+    """Read an uploaded text file safely."""
+    if not file_obj or not file_obj.filename:
+        return ""
+
+    filename = secure_filename(file_obj.filename)
+
+    # Only allow text-like files
+    allowed = {
+        ".txt",
+        ".md",
+        ".csv",
+        ".json",
+    }
+
+    ext = os.path.splitext(filename)[1].lower()
+
+    if ext not in allowed:
+        raise ValueError(
+            "Only TXT, MD, CSV, and JSON files are supported."
+        )
+
+    path = os.path.join(UPLOAD_DIR, filename)
+    file_obj.save(path)
+
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def get_text(form_name):
+    """
+    Get text either from an uploaded file or textarea.
+    """
+    file_obj = request.files.get(f"{form_name}_file")
+
+    if file_obj and file_obj.filename:
+        return read_uploaded_file(file_obj)
+
+    return request.form.get(f"{form_name}_text", "").strip()
+
+
+@app.route("/")
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
 
-@app.route('/evaluate', methods=['POST'])
-def run_evaluate():
-    candidate = request.form.get('candidate', 'A')
-    candidate_name = request.form.get('candidate_name', 'Candidate').strip()
-    job_desc = request.form.get('job_description', '').strip()
-    use_sample = request.form.get('use_sample') == 'on'
 
-    # get resume/transcript for candidate A
-    def get_text(prefix):
-        file_obj = request.files.get(f'{prefix}_file')
-        if file_obj and file_obj.filename:
-            fn = secure_filename(file_obj.filename)
-            path = os.path.join(UPLOAD_DIR, fn)
-            file_obj.save(path)
-            return open(path, 'r', encoding='utf-8').read()
-        return request.form.get(f'{prefix}_text','').strip()
+@app.route("/evaluate", methods=["POST"])
+def run_evaluation():
 
-    resume_text = get_text('resume')
-    transcript_text = get_text('transcript')
+    candidate_name = (
+        request.form.get("candidate_name", "Candidate")
+        .strip()
+        or "Candidate"
+    )
 
-    if use_sample:
-        # evaluate_with_job will use SAMPLEs if empty
-        pass
+    job_description = request.form.get(
+        "job_description", ""
+    ).strip()
 
-    if not resume_text and not transcript_text and use_sample:
-        # review_api will substitute sample if needed
-        pass
+    use_sample = request.form.get("use_sample") == "on"
 
-    if not resume_text or not transcript_text:
-        return "Error: resume and transcript required (paste or upload), or check 'Use sample'", 400
+    try:
+        resume_text = get_text("resume")
+        transcript_text = get_text("transcript")
 
-    provider = 'openai' if request.form.get('real_llm') == 'on' else 'dummy'
-    report = evaluate_with_job(resume_text, transcript_text, provider=provider, job_description=job_desc)
+        # Dummy sample mode
+        if use_sample:
+            if not resume_text:
+                resume_text = SAMPLE_RESUME
 
-    ts = int(time.time())
-    out_name = f"report_{candidate_name.replace(' ','_')}_{ts}.json"
-    out_path = os.path.join(OUTPUT_DIR, out_name)
-    with open(out_path, 'w', encoding='utf-8') as f:
-        json.dump(report, f, indent=2)
+            if not transcript_text:
+                transcript_text = SAMPLE_TRANSCRIPT
 
-    passed = (report.get('recommendation') == 'hire') or (report.get('confidence',0.0) >= float(request.form.get('pass_threshold',0.75)))
+        if not resume_text:
+            return render_template(
+                "index.html",
+                error="Please provide a resume or select 'Use sample candidate'.",
+            ), 400
 
-    return render_template('report.html', report=report, out_name=out_name, passed=passed)
+        if not transcript_text:
+            return render_template(
+                "index.html",
+                error="Please provide an interview transcript or select 'Use sample candidate'.",
+            ), 400
 
-@app.route('/compare', methods=['POST'])
-def run_compare():
-    job_desc = request.form.get('job_description', '').strip()
-    provider = 'openai' if request.form.get('real_llm') == 'on' else 'dummy'
+        # Force dummy LLM
+        report = evaluate(
+            resume_text,
+            transcript_text,
+            provider="dummy",
+        )
 
-    # candidate A
-    def get_text_for(prefix):
-        file_obj = request.files.get(prefix + '_file')
-        if file_obj and file_obj.filename:
-            fn = secure_filename(file_obj.filename)
-            path = os.path.join(UPLOAD_DIR, fn)
-            file_obj.save(path)
-            return open(path, 'r', encoding='utf-8').read()
-        return request.form.get(prefix + '_text','').strip()
+        # Save report
+        timestamp = int(time.time())
 
-    r1 = get_text_for('resumeA')
-    t1 = get_text_for('transcriptA')
-    name1 = request.form.get('candidateA_name','CandidateA')
+        safe_name = secure_filename(candidate_name)
 
-    r2 = get_text_for('resumeB')
-    t2 = get_text_for('transcriptB')
-    name2 = request.form.get('candidateB_name','CandidateB')
+        if not safe_name:
+            safe_name = "candidate"
 
-    if not ((r1 and t1) and (r2 and t2)):
-        return "Error: both candidates require resume and transcript (paste or upload).", 400
+        filename = f"report_{safe_name}_{timestamp}.json"
 
-    comparison = compare_candidates(r1, t1, r2, t2, provider=provider, job_description=job_desc)
+        output_path = os.path.join(
+            OUTPUT_DIR,
+            filename,
+        )
 
-    ts = int(time.time())
-    out_name = f"compare_{ts}.json"
-    out_path = os.path.join(OUTPUT_DIR, out_name)
-    with open(out_path, 'w', encoding='utf-8') as f:
-        json.dump(comparison, f, indent=2)
+        with open(
+            output_path,
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(
+                report,
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
 
-    return render_template('compare.html', comparison=comparison, out_name=out_name, name1=name1, name2=name2)
+        return render_template(
+            "report.html",
+            report=report,
+            candidate_name=candidate_name,
+            job_description=job_description,
+            output_file=filename,
+        )
 
-@app.route('/outputs/<path:filename>')
-def outputs(filename):
-    return send_from_directory(OUTPUT_DIR, filename)
+    except Exception as exc:
 
-@app.route('/api/evaluate', methods=['POST'])
+        return render_template(
+            "index.html",
+            error=f"Evaluation failed: {str(exc)}",
+        ), 500
+
+
+@app.route("/api/evaluate", methods=["POST"])
 def api_evaluate():
-    data = request.json
-    r = data.get('resume')
-    t = data.get('transcript')
-    provider = data.get('provider','dummy')
-    job = data.get('job_description','')
-    if not r or not t:
-        return jsonify({'error':'resume and transcript required'}), 400
+
+    data = request.get_json(silent=True) or {}
+
+    resume = data.get("resume", "")
+    transcript = data.get("transcript", "")
+
+    if not resume or not transcript:
+        return jsonify({
+            "error": "resume and transcript are required"
+        }), 400
+
+    try:
+
+        report = evaluate(
+            resume,
+            transcript,
+            provider="dummy",
+        )
+
+        return jsonify(report)
+
+    except Exception as exc:
+
+        return jsonify({
+            "error": str(exc)
+        }), 500
+
+
+@app.route("/outputs/<path:filename>")
+def download_output(filename):
+    return send_from_directory(
+        OUTPUT_DIR,
+        filename,
+        as_attachment=True,
+    )
+
+
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "service": "candidate-review-system",
+        "llm": "dummy",
+    })
+
+
+if __name__ == "__main__":
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            8080,
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+    )
 
