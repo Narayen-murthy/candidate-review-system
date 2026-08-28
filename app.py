@@ -1,3 +1,19 @@
+import os
+from flask import Flask
+
+app = Flask(__name__)
+
+# your existing routes...
+
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8080))
+    )
+    return jsonify(evaluate_with_job(r, t, provider=provider, job_description=job))
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
 from flask import Flask, render_template, request, send_from_directory, jsonify
 import os, json, time
 from werkzeug.utils import secure_filename
@@ -107,19 +123,4 @@ def api_evaluate():
     job = data.get('job_description','')
     if not r or not t:
         return jsonify({'error':'resume and transcript required'}), 400
-import os
-from flask import Flask
 
-app = Flask(__name__)
-
-# your existing routes...
-
-if __name__ == "__main__":
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080))
-    )
-    return jsonify(evaluate_with_job(r, t, provider=provider, job_description=job))
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
