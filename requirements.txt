@@ -3,3 +3,5 @@ fastapi
 uvicorn
 pydantic
 python-dotenv
+Flask
+gunicorn
